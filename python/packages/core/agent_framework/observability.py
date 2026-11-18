@@ -2694,13 +2694,16 @@ class AgentTelemetryLayer:
 
 # ``FunctionTool.additional_properties`` keys under which an MCP-served function carries the identity of the
 # MCP server it calls. ``get_function_span_attributes`` reads them to stamp ``microsoft.tool.server.name`` and
-# ``url.full`` on the ``execute_tool`` span. The URL is stored already stripped of credentials and query string;
-# its path is dropped at emit time unless sensitive-data capture is enabled.
+# ``url.full`` on the ``execute_tool`` span, plus the standard ``server.address`` and ``server.port`` derived from
+# the URL. The name is the client-configured ``MCPTool.name`` (an alias), not the remote service's own
+# ``service.name``, so it is deliberately not mapped to ``server.service.name``. The URL is stored already
+# stripped of credentials and query string; its path is dropped at emit time unless sensitive-data capture is
+# enabled.
 MCP_SERVER_NAME_PROPERTY = "_mcp_server_name"
 MCP_SERVER_URL_PROPERTY = "_mcp_server_url"
 
 
-def get_function_span_attributes(function: FunctionTool, tool_call_id: str | None = None) -> dict[str, str]:
+def get_function_span_attributes(function: FunctionTool, tool_call_id: str | None = None) -> dict[str, Any]:
     """Get the span attributes for the given function.
 
     Args:
@@ -2708,9 +2711,9 @@ def get_function_span_attributes(function: FunctionTool, tool_call_id: str | Non
         tool_call_id: The id of the tool_call that was requested.
 
     Returns:
-        dict[str, str]: The span attributes.
+        dict[str, Any]: The span attributes.
     """
-    attributes: dict[str, str] = {
+    attributes: dict[str, Any] = {
         OtelAttr.OPERATION: OtelAttr.TOOL_EXECUTION_OPERATION,
         OtelAttr.TOOL_NAME: function.name,
         OtelAttr.TOOL_CALL_ID: tool_call_id or "unknown",
@@ -2729,6 +2732,11 @@ def get_function_span_attributes(function: FunctionTool, tool_call_id: str | Non
         if not OBSERVABILITY_SETTINGS.SENSITIVE_DATA_ENABLED:
             server_url = _strip_url_path(server_url)
         attributes[OtelAttr.URL_FULL] = server_url
+        # Standard endpoint attributes, consistent with the MCP client spans. Neither carries the path.
+        parsed = urlparse(server_url)
+        if parsed.hostname:
+            attributes[OtelAttr.ADDRESS] = parsed.hostname
+            attributes[OtelAttr.PORT] = parsed.port or (443 if parsed.scheme == "https" else 80)
     return attributes
 
 
@@ -2739,7 +2747,7 @@ def _strip_url_path(url: str) -> str:
 
 
 def get_function_span(
-    attributes: dict[str, str],
+    attributes: dict[str, Any],
 ) -> _AgnosticContextManager[trace.Span]:
     """Starts a span for the given function.
 

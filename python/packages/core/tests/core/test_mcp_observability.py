@@ -579,11 +579,66 @@ def test_function_span_attributes_include_mcp_server_identity(
 
     assert attributes[OtelAttr.TOOL_SERVER_NAME] == "weather"
     assert attributes[OtelAttr.TOOL_NAME] == "get_weather"
+    assert attributes[OtelAttr.ADDRESS] == "mcp.example.com"
+    assert attributes[OtelAttr.PORT] == 8443
     if enable_sensitive_data:
         assert attributes[OtelAttr.URL_FULL] == "https://mcp.example.com:8443/token/private-token/mcp"
     else:
         assert attributes[OtelAttr.URL_FULL] == "https://mcp.example.com:8443"
-        assert "private-token" not in "".join(attributes.values())
+        assert "private-token" not in "".join(str(value) for value in attributes.values())
+
+
+def test_function_span_attributes_default_port_for_server_url():
+    from agent_framework import FunctionTool
+    from agent_framework.observability import MCP_SERVER_URL_PROPERTY, get_function_span_attributes
+
+    function = FunctionTool(
+        name="get_weather",
+        description="",
+        func=lambda: "ok",
+        additional_properties={MCP_SERVER_URL_PROPERTY: "https://mcp.example.com/mcp"},
+    )
+
+    attributes = get_function_span_attributes(function, "call-1")
+
+    assert attributes[OtelAttr.ADDRESS] == "mcp.example.com"
+    assert attributes[OtelAttr.PORT] == 443
+
+
+@pytest.mark.parametrize("enable_sensitive_data", [True, False], indirect=True)
+async def test_discovered_mcp_function_emits_server_identity_on_execute_tool_span(
+    span_exporter: InMemorySpanExporter, enable_sensitive_data: bool
+):
+    tool = MCPStreamableHTTPTool(name="weather", url="https://mcp.example.com:8443/token/private-token/mcp?key=secret")
+    tool.session = AsyncMock()
+    tool._require_connection().is_framework_owned = True
+    tool.is_connected = True
+    tool._supports_tools = True
+    tool._supports_prompts = False
+    tool.load_tools_flag = True
+    tool.load_prompts_flag = False
+    tool.session.list_tools = AsyncMock(return_value=_make_tool_list_result())  # type: ignore[method-assign, union-attr]  # ty: ignore[invalid-assignment]
+    tool.session.call_tool = AsyncMock(return_value=_make_call_tool_result("ok"))  # type: ignore[method-assign, union-attr]  # ty: ignore[invalid-assignment]
+
+    await tool.load_tools()
+    function = next(func for func in tool.functions if func.name == "get-weather")
+    span_exporter.clear()
+    await function.invoke(arguments={"city": "Seattle"}, tool_call_id="call-1")
+
+    execute_tool_spans = [s for s in span_exporter.get_finished_spans() if s.name == "execute_tool get-weather"]
+    assert len(execute_tool_spans) == 1
+    attributes = dict(execute_tool_spans[0].attributes or {})
+    assert attributes[OtelAttr.TOOL_SERVER_NAME] == "weather"
+    assert attributes[OtelAttr.ADDRESS] == "mcp.example.com"
+    assert attributes[OtelAttr.PORT] == 8443
+    if enable_sensitive_data:
+        assert attributes[OtelAttr.URL_FULL] == "https://mcp.example.com:8443/token/private-token/mcp"
+    else:
+        assert attributes[OtelAttr.URL_FULL] == "https://mcp.example.com:8443"
+    exported = "".join(str(value) for value in attributes.values())
+    if not enable_sensitive_data:
+        assert "private-token" not in exported
+    assert "secret" not in exported
 
 
 def test_function_span_attributes_omit_server_identity_for_plain_function():
